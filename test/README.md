@@ -1,6 +1,8 @@
+Examples:
+--------------------------
 This folder contains three different multipliers.
 
-Run 'test.sh' to run all provided test cases.
+Run './test.sh' to execute all provided test cases.
 
 In all three cases we apply adder substition before verifying the (rewritten) 
 multiplier. Log files for AMulet are provided.
