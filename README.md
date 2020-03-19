@@ -16,4 +16,18 @@ See [`test/README.md`](test/README.md) for testing `AMulet`.
 Our tool has the following usage `amulet <modus> <input.aig> <output files> [<option> ...] `.
 See `amulet -h` for more detailed options.
 
+For further information we refer to the papers:
+
+Daniela Kaufmann, Armin Biere, Manuel Kauers. 
+ [`Verifying Large Multipliers by Combining SAT and Computer Algebra.`](http://fmv.jku.at/papers/KaufmannBiereKauers-FMCAD19.pdf)
+In Proc. 19th Intl. Conf. on Formal Methods in Computer Aided Design (FMCAD'19), pages 28-36, IEEE 2019.
+
+and 
+
+Daniela Kaufmann, Armin Biere, Manuel Kauers. 
+ [`SAT, Computer Algebra, Multipliers.`](http://fmv.jku.at/papers/KaufmannBiereKauers-Vampire19.pdf)
+In Vampire 2018 and Vampire 2019. The 5th and 6th Vampire Workshops, pages 1-18, EasyChair 2020.
+
+
+
 Daniela Kaufmann
