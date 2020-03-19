@@ -1,0 +1,7 @@
+CC=@CC@
+CFLAGS=@CFLAGS@
+AIGLIB=@AIGLIB@
+amulet: amulet.c makefile
+	$(CC) $(CFLAGS) -o $@ amulet.c $(AIGLIB) -lgmp
+clean:
+	rm -f amulet makefile 
