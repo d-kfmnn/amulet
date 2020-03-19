@@ -6,8 +6,7 @@ AMulet - AIG Multiplier Examination Tool
 Our tool AMulet is able to verify and certify unsigned and signed integer multipliers 
 given as AIGs.
 
-Use `./configure.sh && make` to configure and build `AMulet` and the AIGER library
-in the  `aiger` sub-directory.  
+Use `./build.sh` to configure and build `AMulet` and the AIGER library in the  `aiger` sub-directory.  
 
 Furthermore, you need to have installed <gmp> to run `AMulet`.
 
