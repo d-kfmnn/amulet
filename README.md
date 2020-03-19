@@ -8,7 +8,7 @@ given as AIGs.
 
 Use `./build.sh` to configure and build `AMulet` and the AIGER library in the  `aiger` sub-directory.  
 
-Furthermore, you need to have installed <gmp> to run `AMulet`.
+Furthermore, you need to have installed `gmp` to run `AMulet`.
 
 See [`test/README.md`](test/README.md) for testing `AMulet`.  
   
