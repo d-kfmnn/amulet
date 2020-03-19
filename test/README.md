@@ -7,11 +7,11 @@ Run './test.sh' to execute all provided test cases.
 In all three cases we apply adder substition before verifying the (rewritten) 
 multiplier. Log files for AMulet are provided.
 To completely verify the multiplier the generated '*.cnf' file needs to be given 
-to a SAT solver, e.g. [`https://github.com/arminbiere/cadical`](CaDiCaL), which has to yield 'UNSAT'.
+to a SAT solver, e.g. [`CaDiCal`](https://github.com/arminbiere/cadical), which has to yield 'UNSAT'.
 
 In the third example we furthermore generate proof certificates, which can 
-be given to our proof checkers [`http://fmv.jku.at/pacheck_pasteque/`](Pacheck)
-or [`http://fmv.jku.at/pacheck_pasteque/`](Pastéque).
+be given to our proof checkers [`Pacheck`](http://fmv.jku.at/pacheck_pasteque/)
+or [`Pastéque`](http://fmv.jku.at/pacheck_pasteque/).
 
 We provide the following multipliers:
 
