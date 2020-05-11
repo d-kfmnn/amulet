@@ -1,8 +1,7 @@
 /*------------------------------------------------------------------------*/
 /* Copyright (C) 2019,2020 Daniela Kaufmann, Johannes Kepler University Linz */
 /*------------------------------------------------------------------------*/
-
-#define VERSION "001"
+#define VERSION "002"
 
 static const char * USAGE =
 "\n"
@@ -27,12 +26,14 @@ static const char * USAGE =
 "    <output files> =  no output files are required \n"
 "     \n "
 "    <option> = the following options are available \n"
-"       -h | --help      print this command line summary \n"
-"       -v<1,2,3,4>      different levels of verbosity (see below) \n"
-"       -2comp           option for non-negative integer multipliers \n"
-"       -no-mod          use ring Z[X] instead of Z_m[X] \n"
-"       -no-elim         turn off variable elimination \n"
-"       -non-inc         use non-incremental specification \n"
+"       -h | --help           print this command line summary \n"
+"       -v<1,2,3,4>           different levels of verbosity (see below) \n"
+"       -2comp                option for non-negative integer multipliers \n"
+"       -no-mod               use ring Z[X] instead of Z_m[X] \n"
+"       -no-elim              turn off variable elimination \n"
+"       -non-inc              use non-incremental specification \n"
+"       -swap                 swaps input bitvectors a,b and uses alternative names \n"
+"       -no-counter-examples  do not generate and write counter examples\n"
 "     \n"
 "     \n"
 "<modus> = -certify:\n"
@@ -42,12 +43,16 @@ static const char * USAGE =
 "      <out.spec> :      spec which should be checked \n"
 "     \n "
 "    <option> = the following options are available \n"
-"       -h | --help      print this command line summary \n"
-"       -v<1,2,3,4>      different levels of verbosity (see below) \n"
-"       -2comp           option for non-negative integer multipliers \n"
-"       -no-mod          use ring Z[X] instead of Z_m[X] \n"
-"       -no-elim         turn off variable elimination \n"
-"       -non-inc         use non-incremental specification \n"
+"       -h | --help           print this command line summary \n"
+"       -v<1,2,3,4>           different levels of verbosity (see below) \n"
+"       -2comp                option for non-negative integer multipliers \n"
+"       -no-mod               use ring Z[X] instead of Z_m[X] \n"
+"       -no-elim              turn off variable elimination \n"
+"       -non-inc              use non-incremental specification \n"
+"       -swap                 swaps input bitvectors a,b and uses alternative names \n"
+"       -print_idx <int>      starts indices with the provided integer value\n"
+"       -expanded-pac         produces proofs in original PAC format, with expanded antecedents\n"
+"       -no-counter-examples  do not generate and write counter examples\n"
 "     \n"
 "     \n"
 
@@ -96,6 +101,7 @@ static const char * USAGE =
 #include <gmp.h>
 
 #include <assert.h>
+#include <ctype.h>
 #include <inttypes.h>
 #include <limits.h>
 #include <stdarg.h>
@@ -137,7 +143,11 @@ static int incremental = 1;     // incremental specification
 static int modulo = 1;
 static int elim = 1;
 static int pac = 0;
+static int pac_expand = 0;
+static int swap = 0;
+static int init_print_idx = 1;
 static int print_idx = 1;
+static int gen_counter_ex = 1;
 static int verbose = 0;         // the outputlevel of verbose
 
 static const char * input_name = 0;
@@ -233,6 +243,8 @@ static uint64_t hash_string (char * str) {
   }
   return res;
 }
+
+
 
 /*------------------------------------------------------------------------*/
 
@@ -406,6 +418,15 @@ void init_all_signal_handers () {
   original_SIGTERM_handler = signal (SIGTERM, catch_signal);
 }
 /*------------------------------------------------------------------------*/
+static int is_number(char str[])
+{
+  for (int i = 0; str[i] != 0; i++) {
+    if (!isdigit(str[i])) return 0;
+  }
+  return 1;
+}
+/*------------------------------------------------------------------------*/
+
 // AIGER methods
 static aiger * model, * rewritten, * miter;   // aiger model - calls aiger.h
 
@@ -462,13 +483,6 @@ static void init_aiger_with_checks(){
       model->num_inputs, model->num_outputs);
 
 
-/*  for (unsigned i = 0; i < M; i++) {
-    aiger_and * and = aiger_is_and (model, 2*i);
-    if (!and) continue;
-    if (aiger_lit2var (and->rhs0) >= i || aiger_lit2var (and->rhs1) >= i)
-      die ("only binary or sorted AIGER models supported");
-  }*/
-
   msg ("MILOA %u %u %u %u %u",
     model->maxvar,
     model->num_inputs,
@@ -499,8 +513,6 @@ static int match_and (unsigned lhs, unsigned rhs0, unsigned rhs1) {
   if (and->rhs0 == rhs1 && and->rhs1 == rhs0) return 1;
   return 0;
 }
-
-
 
 // returns input number of a
 static unsigned alit (unsigned i) {
@@ -664,13 +676,13 @@ struct Var {
   int haand;
   int hainp;
 
-  int bo;	   // 1 if it was eliminated during booth recoding
-  int cl;	   // 1 if it seems to be cl adder
+  int bo;	         // 1 if it was eliminated during booth recoding
+  int cl;	         // 1 if it seems to be gp adder
   int pp;          // determines if pp
   int neg;         // determines if Var is negation
 
   int elim;        // define if it is already considered to be eliminated
-  int rewrite;        // define if it is already considered to be rewriteinated
+  int rewrite;     // define if it is already considered to be rewriten
 };
 
 static Var * vars;
@@ -732,7 +744,8 @@ static void set_name_input_and_output(){
   for (unsigned i = 0; i < N; i++) {
     Var * v = var (alit(i));
     assert (aiger_is_input (model, v->aiger));
-    sprintf (buffer, "a%d", i);
+    if(swap) sprintf (buffer, "b%d", i);
+    else sprintf (buffer, "a%d", i);
     v->name = strdup (buffer);
     v->input = 1;
     v->output = is_output(2*i);
@@ -742,7 +755,8 @@ static void set_name_input_and_output(){
   for (unsigned i = 0; i < N; i++) {
     Var * v = var (blit(i));
     assert (aiger_is_input (model, v->aiger));
-    sprintf (buffer, "b%d", i);
+    if(swap) sprintf (buffer, "a%d", i);
+    else sprintf (buffer, "b%d", i);
     v->name = strdup (buffer);
     v->input = 2;
     v->output = is_output(2*i);
@@ -753,7 +767,9 @@ static void set_name_input_and_output(){
     Var * v = var (2*i);
     if (v->input > 0) continue;
     assert (aiger_is_and (model, v->aiger));
-    sprintf (buffer, "l%d", 2*i);
+    if(swap) sprintf (buffer, "g%d", 2*i);
+    else sprintf (buffer, "l%d", 2*i);
+
     v->name = strdup (buffer);
     v->output = is_output(2*i);
     v->hash = hash_string (v->name);
@@ -762,7 +778,8 @@ static void set_name_input_and_output(){
 
   for (unsigned i = 0; i < NN; i++){
     Var * v = vars + M + i;
-    sprintf (buffer, "s%d", i);
+    if(swap) sprintf (buffer, "t%d", i);
+    else sprintf (buffer, "s%d", i);
     v->aiger = -i;
     v->name = strdup (buffer);
     v->output = NN + 1;
@@ -931,9 +948,6 @@ static void set_ha(){
     var(p->pval)->haand = ha_num;
     l->hainp = ha_num;
     r->hainp = ha_num;
-    //msg("found ha%i %s %s with children %s %s", ha_num, var(p->pval)->name, v->name, l->name, r->name);
-
-
   }
 }
 
@@ -1063,9 +1077,6 @@ static void input_cone(unsigned lit, int num){
 
 /*****************************************************************************/
 static Var * adder_carry_out;
-//TODO: dynamically enlarge these
-//static unsigned seen[1000];
-//static unsigned seen_num = 0;
 static unsigned size_pg;
 static unsigned pg_num = 0;
 static unsigned * pg;
@@ -1198,7 +1209,6 @@ static int declare_possible_P_and_cin(){
       for(unsigned j = M-1; j>0; j--){
         Var * w = vars + j;
         if(w->haand == xor->haxor && w->slice == xor->slice +1){
-          //msg("w is %s in slice %i, xor is %s in slice %i", w->name, w->slice, xor->name, xor->slice);
           if (size_pg == pg_num) enlarge_pg ();
           pg[pg_num++] = w->aiger;
           if(verbose >= 1) msg("found generate node %i", pg[pg_num-1]);
@@ -1210,8 +1220,6 @@ static int declare_possible_P_and_cin(){
 
           g_0->neg = aiger_sign(par->rhs0);
           g_1->neg = aiger_sign(par->rhs1);
-          //msg("%s has sign %i and slice %i", g_0->name, g_0->neg, g_0->slice);
-          //msg("%s has sign %i and slice %i", g_1->name, g_1->neg, g_1->slice);
           if (size_inputs == inputs_num) enlarge_inputs ();
           inputs[inputs_num++] = g_0->aiger;
           if (size_inputs == inputs_num) enlarge_inputs ();
@@ -1312,11 +1320,9 @@ static int follow_path(unsigned val){
 
 static int follow_all_carry_paths(){
   msg("checking last stage adder");
-
   int ret = follow_path(adder_carry_out->aiger);
   if(!ret) return 0;
   for (unsigned i = 0; i< cin_num-1; i++){
-
     ret = follow_path(cin[i]);
     if(!ret) return 0;
   }
@@ -1439,7 +1445,6 @@ static unsigned btor_ha(unsigned i1, unsigned i2){
   max_idx = max_idx + 6;
   if (size_o2 == o2_count) enlarge_o2 ();
   o2[o2_count++] = three;
-  //msg("found ha %i, %i and s %i and c %i", i1, i2, three, two);
   return two;
 }
 
@@ -1473,7 +1478,6 @@ static unsigned btor_fa(unsigned i1, unsigned i2, unsigned i3){
   max_idx = max_idx + 14;
   if (size_o2 == o2_count) enlarge_o2 ();
   o2[o2_count++] = six;
-  //msg("found fa %i, %i, %i and s %i and c %i", i1, i2, i3, six, seven);
   return seven;
 }
 
@@ -1486,7 +1490,6 @@ static void build_btor_adder(){
     msg("no cin in FSA");
     for(unsigned i = 0; i< inputs_num; i++) fprintf(stdout, "%i ", inputs[i]);
     Var * v = var(inputs[inputs_num-1]);
-    //assert(v->slice == w->slice);
     i2 = v->aiger;
     if (!v->neg) i2 = not(i2);
     c = btor_ha(c, i2);
@@ -1496,7 +1499,6 @@ static void build_btor_adder(){
   for(int i = inputs_num-1; i>=0; i--){
     Var * v = var(inputs[i--]);
     Var * w = var(inputs[i]);
-    //assert(v->slice == w->slice);
     i2 = v->aiger;
     if (v->neg) i2 = not(i2);
     i3 = w->aiger;
@@ -1671,7 +1673,38 @@ static void miter_to_cnf(FILE* file){
 }
 
 /******************************************************************************/
+static void substitute(){
+  msg("assigning slices to variables");
+  for (unsigned i = 0; i < NN; i++)
+    input_cone(aiger_strip(slit(i)), i);
 
+  if(!truncated) restart = find_adder();
+  int fail;
+  if(restart){
+    msg("generate-propagate adder found - rewriting necessary");
+    fail = build_adder_miter();
+    if(!fail){
+      miter_to_cnf(output_file);
+      msg("writing miter to %s", output_name);
+      generate_rewritten_aig();
+
+      msg ("writing rewritten aig to '%s'", output_name2);
+      if (!aiger_write_to_file (rewritten, aiger_binary_mode, output_file2))
+        die ("failed to write rewritten '%s'", output_name2);
+    }
+
+  }
+  if(!restart || fail) {
+    if(!restart) msg("no generate-propagate adder found");
+    else msg("due to error in adder substition -> abort rewriting");
+    empty_miter_to_cnf(output_file);
+    msg("writing trivial miter to %s", output_name);
+    msg ("writing original aig to '%s'",output_name2);
+    if (!aiger_write_to_file (model, aiger_binary_mode, output_file2))
+      die ("failed to write rewritten '%s'", output_name2);
+  }
+}
+/******************************************************************************/
 //check if parent of var is in bigger slice
 static void find_carries(){
   for(int i = M-1; i > 0; i--){
@@ -1685,8 +1718,6 @@ static void find_carries(){
       p = p->rest;
     }
     if(v->output > v->slice) v->carry++;
-
-    //msg("var %s is carry of size %i", v->name, v->carry);
   }
 }
 
@@ -1840,23 +1871,6 @@ static void promote_all(){
 }
 
 
-/*static void mark_var_with_two_pos_children(){
-  for(unsigned i = 0; i < M; i++){
-    Var * v = vars + i;
-    if(v->elim) continue;
-    if(!v->pp) continue;
-    aiger_and * and = aiger_is_and (model, v->aiger);
-    unsigned l = and->rhs0, r = and->rhs1;
-    if (!aiger_sign (l) && !aiger_sign(r)) {
-      msg("found var %s", v->name);
-      v->bo=1;
-    }
-
-  }
-
-}*/
-
-
 static void search_for_booth_pattern(){
 
   for(unsigned i = 0; i < M; i++){
@@ -1933,42 +1947,6 @@ static void search_for_booth_pattern(){
   }
 }
 
-
-static void substitute(){
-  msg("assigning slices to variables");
-  for (unsigned i = 0; i < NN; i++)
-    input_cone(aiger_strip(slit(i)), i);
-
-  if(!truncated) restart = find_adder();
-  int fail;
-  if(restart){
-    msg("generate-propagate adder found - rewriting necessary");
-    fail = build_adder_miter();
-    if(!fail){
-      miter_to_cnf(output_file);
-      msg("writing miter to %s", output_name);
-      generate_rewritten_aig();
-
-      msg ("writing rewritten aig to '%s'", output_name2);
-      if (!aiger_write_to_file (rewritten, aiger_binary_mode, output_file2))
-        die ("failed to write rewritten '%s'", output_name2);
-    }
-
-  }
-  if(!restart || fail) {
-    if(!restart) msg("no generate-propagate adder found");
-    else msg("due to error in adder substition -> abort rewriting");
-    empty_miter_to_cnf(output_file);
-    msg("writing trivial miter to %s", output_name);
-    msg ("writing original aig to '%s'",output_name2);
-    if (!aiger_write_to_file (model, aiger_binary_mode, output_file2))
-      die ("failed to write rewritten '%s'", output_name2);
-  }
-}
-
-
-
-
 // incrementally define input cone
 static void assign_slices_to_var(){
   msg("assigning slices to variables");
@@ -1984,7 +1962,8 @@ static void assign_slices_to_var(){
 
 
 }
-
+/******************************************************************************/
+// Polynomial arithmetic
 /*------------------------------------------------------------------------*/
 typedef struct Term Term;
 
@@ -2042,6 +2021,26 @@ static Term * copy_term (Term * m) {
   m->ref++;
   assert (m->ref);
   return m;
+}
+
+static int term_size (Term * t) {
+  if (!t) return 0;
+  int i = 0;
+  while(t){
+    i++;
+    t = t->rest;
+  }
+  return i;
+}
+
+static int check_term_contains_inputs_only(Term * t){
+  if(!t) return 1;
+  while(t){
+    Var * v = t->variable;
+    if(!v->input) return 0;
+    t = t->rest;
+  }
+  return 1;
 }
 
 
@@ -2151,44 +2150,16 @@ static void enlarge_vstack () {
 }
 
 // push char on buffer
-/*static void push_vstack (Var *v) {
-  if (size_vstack == num_vstack) enlarge_vstack ();
-  //vstack[num_vstack++] = v;
-
-  if (num_vstack==0) vstack[num_vstack++] = v;
-  else
-  {
-     unsigned i = 0;
-     Var * tmp;
-     while (i < num_vstack) {
-       tmp = vstack[i];
-       if (tmp->level == v->level) return;
-       if (tmp->level > v->level) break;
-       i++;
-     }
-
-     for(unsigned j = num_vstack; j>i; j--)
-       vstack[j] = vstack[j-1];
-
-     vstack[i] = v;
-     num_vstack++;
-  }
-}*/
-
-// push char on buffer
 static void push_vstack_sorted (Var *v) {
   if (size_vstack == num_vstack) enlarge_vstack ();
   vstack[num_vstack++] = v;
 }
-
 
 // set size of buffer to zero
 static void clear_vstack () { num_vstack = 0; }
 
 // deallocate whole buffer
 static void deallocate_vstack () { DEALLOCATE (vstack, size_vstack); }
-
-
 
 // Generate a term from the variables on the stack
 static Term * build_term_from_stack () {
@@ -2199,13 +2170,9 @@ static Term * build_term_from_stack () {
     deallocate_term(res);
     res = t;
   }
-
   clear_vstack();
   return res;
 }
-
-
-
 /*------------------------------------------------------------------------*/
 
 typedef struct Monomial Monomial;
@@ -2258,17 +2225,7 @@ static void print_monomial (Monomial * t, FILE * file, int lm){
     if(mpz_cmp_ui(t->coeff, 1) != 0 && mpz_cmp_si(t->coeff, -1) != 0) fputc_unlocked('*',file);
     print_term(t->term, file);
   }
-
 }
-
-// compare two monomials
-static int cmp_monomials(Monomial * t1, Monomial * t2){
-  //if (mpz_cmp_ui(t1->coeff, 0) == 0) return 1;
-  //if (mpz_cmp_ui(t1->coeff, 0) == 0) return -1;
-
-  return cmp_terms(t1->term, t2->term);
-}
-
 
 /*------------------------------------------------------------------------*/
 typedef struct Polynomial Polynomial;
@@ -2283,7 +2240,7 @@ struct Polynomial {
 // generate new polynomial
 static Polynomial *
 new_polynomial (Monomial * lm, Polynomial * rest) {
-  if (rest) assert (cmp_monomials(lm, rest->lm) >= 0);
+  if (rest) assert (cmp_terms(lm->term, rest->lm->term) >= 0);
 
   Polynomial * res = allocate (sizeof *res);
   res->lm = lm;
@@ -2303,13 +2260,6 @@ static int is_one_poly(Polynomial* p){
   return 1;
 }
 
-// copy a poly
-// static Polynomial * copy_poly(Polynomial*p){
-//   if(!p) return 0;
-//   Polynomial * p1 =new_polynomial(copy_monomial(p->lm), copy_poly(p->rest));
-//   assert(p1);
-//   return p1;
-// }
 
 // copy a poly
 static Polynomial * copy_poly(Polynomial*p){
@@ -2375,6 +2325,27 @@ static void update_proof_statistics(Polynomial *p){
 }
 
 
+static int check_poly_inputs_only(Polynomial * p){
+  if (!p) return 1;
+  while(p){
+    if(!check_term_contains_inputs_only(p->lm->term)) return 0;
+    p = p->rest;
+  }
+  return 1;
+}
+
+static int get_min_term_size(Polynomial * p){
+  int len = INT_MAX;
+
+  while(p){
+      int tlen = term_size(p->lm->term);
+      if(tlen < len) len = tlen;
+      p = p->rest;
+  }
+  return len;
+}
+
+
 /*------------------------------------------------------------------------*/
 static size_t size_mstack;
 static size_t num_mstack = 0;
@@ -2408,7 +2379,7 @@ static void push_mstack (Monomial * t) {
 
     while (i >= 0) {
       tmp = mstack[i];
-      cmp = cmp_monomials(tmp, t);
+      cmp = cmp_terms(tmp->term, t->term);
       if (cmp >= 0) break;
       i--;
     }
@@ -2476,156 +2447,9 @@ static Polynomial * build_polynomial_from_stack () {
 }
 
 
-
-
-
-// Define a stack for sorting monomials in polynomials
-/*static unsigned num_mstack = 0;
-static Polynomial * mstack = 0;
-
-
-// push char on buffer
-static void push_mstack (Monomial * t) {
-  assert(t);
-
-  if (mpz_cmp_si(t->coeff, 0) == 0) {
-    deallocate_monomial(t);
-    return;
-  }
-
-  if(!mstack) {
-    mstack = new_polynomial(t, 0);
-  }
-  else
-  {
-    Polynomial * tmp = mstack;
-    Polynomial * prev = 0;
-
-    while(tmp){
-      if (cmp_monomials(tmp->lm, t) <= 0) break;
-      prev = tmp;
-      tmp = tmp->rest;
-    }
-    if(!tmp){
-      prev->rest = new_polynomial(t, 0);
-    } else {
-      if(cmp_terms(tmp->lm->term, t->term) == 0){
-
-        mpz_add(tmp->lm->coeff, tmp->lm->coeff, t->coeff);
-        deallocate_monomial(t);
-
-        if(mpz_cmp_si(tmp->lm->coeff,0) == 0){
-          if(!prev) mstack = mstack->rest;
-          else prev->rest = tmp->rest;
-
-          deallocate_monomial(tmp->lm);
-          Polynomial * rest = tmp->rest;
-          deallocate (tmp, sizeof *tmp);
-          tmp = rest;
-        }
-      }
-      else {
-        Polynomial * insert = new_polynomial(t, tmp);
-        num_mstack++;
-        if(!prev) mstack = insert;
-        else prev->rest = insert;
-      }
-    }
-  }
-
-}
-
-// build a polynomial from stack
-static Polynomial * build_polynomial_from_stack () {
-  Polynomial * res = mstack;
-  mstack = 0;
-  if(num_mstack > max_count) max_count = num_mstack;
-  num_mstack = 0;
-
-  return res;
-}*/
-
-
-
-
 /*------------------------------------------------------------------------*/
-static int contained(Term * m1, Term * m2){
-  int found = 0;
-  Term * tmp1 = m1;
-
-  while(tmp1){
-    Term * tmp2 = m2;
-    while(tmp2){
-      if(tmp1->variable == tmp2->variable) found = 1;
-      tmp2 = tmp2->rest;
-    }
-    if(!found) return 0;
-    found = 0;
-    tmp1 = tmp1->rest;
-  }
-  return 1;
-}
 
 
-
-
-// if term m2 is contained in m1 it calculates the remainder.
-static Term * term_remainder(Term * m1, Term * m2){
-  assert(!num_vstack);
-  Term * dividend = m1;
-  Term * divisor = m2;
-  assert(contained(m2, m1));
-
-  if(m1 == m2) return 0;
-
-  while(divisor){
-    Var * v1 = dividend->variable;
-    Var * v2 = divisor->variable;
-
-    if(v1->level == v2->level){
-      divisor = divisor->rest;
-      dividend = dividend->rest;
-    }
-
-    if(v1->level < v2->level){
-      push_vstack_sorted(v1);
-      dividend = dividend->rest;
-    }
-  }
-
-  while(dividend){
-    push_vstack_sorted(dividend->variable);
-    dividend = dividend->rest;
-  }
-
-  Term * m = build_term_from_stack();
-  return m;
-}
-
-// we divide polynomial p1 by the lm of p2
-static Polynomial * divide_lm(Polynomial * p1, Polynomial * p2){
-  assert(!num_mstack);
-  Term * lm = p2->lm->term;
-
-  Polynomial * tmp = p1;
-
-  while(tmp){
-    Monomial * lm_tmp = tmp->lm;
-    if(contained(lm, lm_tmp->term)){
-      Term * m = term_remainder(lm_tmp->term, lm);
-
-      mpz_t ctmp;
-      mpz_init(ctmp);
-      mpz_cdiv_q(ctmp, lm_tmp->coeff, p2->lm->coeff);
-      mpz_mul_si(ctmp, ctmp, -1);
-      push_mstack_sorted(new_monomial(ctmp, copy_term(m)));
-      mpz_clear(ctmp);
-    }
-    tmp = tmp->rest;
-  }
-  Polynomial * p = build_polynomial_from_stack();
-  return p;
-}
 
 /*------------------------------------------------------------------------*/
 
@@ -2652,12 +2476,7 @@ static Polynomial * add_poly(Polynomial *p1, Polynomial *p2){
       p1 = p1->rest;
       p2 = p2->rest;
     }
-
-
   }
-
-
-
   while(p1){
     push_mstack_sorted(copy_monomial(p1->lm));
     p1 = p1->rest;
@@ -2692,7 +2511,6 @@ static Monomial * multiply_monomial(Monomial * t1, Monomial * t2){
       push_vstack_sorted(tmp1->variable);
       tmp1 = tmp1->rest;
       tmp2 = tmp2->rest;
-
     }
   }
 
@@ -2743,6 +2561,7 @@ static Polynomial * multiply_poly(Polynomial *p1, Polynomial *p2){
 
 // multiply Poly with constant
 static Polynomial * multiply_poly_with_constant(Polynomial *p1, mpz_t coeff){
+  if (mpz_cmp_si(coeff, 0) == 0) return 0;
   assert(!num_mstack);
   Polynomial * tmp1 = p1;
 
@@ -2750,7 +2569,6 @@ static Polynomial * multiply_poly_with_constant(Polynomial *p1, mpz_t coeff){
     mpz_mul(tmp1->lm->coeff, tmp1->lm->coeff, coeff);
     tmp1 = tmp1->rest;
   }
-
   return p1;
 }
 
@@ -2765,83 +2583,7 @@ static Polynomial * negate_poly(Polynomial * p1){
   return p1;
 }
 
-
-static Polynomial * mod_poly(Polynomial *p1, int elim){
-  assert(!num_mstack);
-  int exp = NN;
-  mpz_t coeff;
-  mpz_init(coeff);
-
-  Polynomial * old_p1 = copy_poly(p1);
-
-  Polynomial * tmp = p1;
-  Polynomial * prev = 0;
-  int found_mod = 0;
-
-  while(tmp){
-      if(pac && elim){
-        mpz_tdiv_q_2exp(coeff, tmp->lm->coeff, exp);
-        if (mpz_cmp_si(coeff, 0) != 0){
-          push_mstack_sorted(new_monomial(coeff, copy_term(tmp->lm->term)));
-          found_mod = 1;
-        }
-      }
-      mpz_tdiv_r_2exp(tmp->lm->coeff, tmp->lm->coeff, exp);
-      if(mpz_cmp_si(tmp->lm->coeff, 0) == 0){
-         if(!prev) p1 = p1->rest;
-         else {
-           prev->rest = tmp->rest;
-
-         }
-         deallocate_monomial(tmp->lm);
-         Polynomial * rest = tmp->rest;
-         deallocate (tmp, sizeof *tmp);
-         tmp = rest;
-
-      } else{
-        prev = tmp;
-        tmp = tmp->rest;
-      }
-  }
-
-
-  if(pac && elim && found_mod){
-      Polynomial * res = build_polynomial_from_stack();
-      fprintf(output_file2, "%i *: 1, ", print_idx);
-      res = negate_poly(res);
-      print_polynomial(res, output_file2); fprintf(output_file2, ", ");
-
-
-      res = multiply_poly_with_constant(res, mod_coeff);
-      print_polynomial(res, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(res);
-      res->idx = print_idx++;
-
-      fprintf(output_file2, "%i  ", print_idx);
-      fprintf(output_file2, "+: %i, %i, ", old_p1->idx, res->idx);
-      print_polynomial(p1, output_file2);
-      fprintf(output_file2, ";\n");
-
-      if(elim < 2){
-        fprintf(output_file2, "%i d;\n", old_p1->idx);
-        fprintf(output_file2, "%i d;\n", res->idx);
-      }
-      update_proof_statistics(p1);
-      p1->idx = print_idx++;
-
-      deallocate_polynomial(res);
-  }
-
-  mpz_clear(coeff);
-  deallocate_polynomial(old_p1);
-
-  return p1;
-}
-
-
-/*------------------------------------------------------------------------*/
-
+/*----------------------------------------------------------------------------*/
 static Polynomial * define_pos_poly_onstack (Var * v){
   mpz_t one;
   mpz_init(one);
@@ -2978,6 +2720,264 @@ static Polynomial * define_circuit_poly(Var * v){
   return res;
 
 }
+/******************************************************************************/
+// PAC printing proof_rules
+/*------------------------------------------------------------------------*/
+// Orig PAC printing rules
+static void print_pac_add_rule_no_idx (int del, Polynomial *p1, Polynomial *p2, Polynomial *p){
+  if(del) fprintf(output_file2, "d ");
+  fprintf(output_file2, "+: ");
+  print_polynomial(p1, output_file2); fprintf(output_file2, ", ");
+  print_polynomial(p2, output_file2); fprintf(output_file2, ", ");
+  print_polynomial(p, output_file2);  fprintf(output_file2, ";\n");
+
+  update_proof_statistics(p);
+  p->idx = print_idx++;
+}
+
+static void print_pac_mul_rule_no_idx (int del, Polynomial *p1, Polynomial *p2, Polynomial *p){
+  if(del) fprintf(output_file2, "d ");
+  fprintf(output_file2, "*: ");
+  print_polynomial(p1, output_file2); fprintf(output_file2, ", ");
+  print_polynomial(p2, output_file2); fprintf(output_file2, ", ");
+  print_polynomial(p, output_file2);  fprintf(output_file2, ";\n");
+
+  update_proof_statistics(p);
+  p->idx = print_idx++;
+}
+
+static Polynomial * print_pac_mul_with_mod_coeff_rule_no_idx (int del, Polynomial *p){
+  if(del) fprintf(output_file2, "d ");
+  fprintf(output_file2, "*: ");
+  mpz_out_str(output_file2, 10, mod_coeff); fprintf(output_file2, ", ");
+  print_polynomial(p, output_file2); fprintf(output_file2, ", ");
+  p = multiply_poly_with_constant(p, mod_coeff);
+  print_polynomial(p, output_file2); fprintf(output_file2, ";\n");
+  update_proof_statistics(p);
+  p->idx = print_idx++;
+  return p;
+}
+
+/*------------------------------------------------------------------------*/
+// New PAC printing rules
+static void print_pac_del_rule_idx (int idx){
+  fprintf(output_file2, "%i d;\n", idx);
+}
+
+static void print_pac_add_rule_idx (int del, int idx1, int idx2, Polynomial *p){
+  fprintf(output_file2, "%i  ", print_idx);
+  fprintf(output_file2, "+: %i, %i, ", idx1, idx2);
+  print_polynomial(p, output_file2);
+  fprintf(output_file2, ";\n");
+
+  update_proof_statistics(p);
+  p->idx = print_idx++;
+
+  if(del){
+    print_pac_del_rule_idx (idx1);
+    print_pac_del_rule_idx (idx2);
+  }
+}
+
+static void print_pac_mul_rule_idx (int del, int idx1, Polynomial *p, Polynomial *q){
+  fprintf(output_file2, "%i ", print_idx);
+  fprintf(output_file2, "*: %i, ", idx1);
+  print_polynomial(p, output_file2); fprintf(output_file2, ", ");
+  print_polynomial(q, output_file2);
+  fprintf(output_file2, ";\n");
+
+  update_proof_statistics(q);
+  q->idx = print_idx++;
+
+  if(del){
+    print_pac_del_rule_idx (idx1);
+  }
+}
+
+static Polynomial * print_pac_mul_with_mod_coeff_rule_idx (Polynomial *p){
+  fprintf(output_file2, "%i *: %i, ", print_idx, init_print_idx);
+  print_polynomial(p, output_file2); fprintf(output_file2, ", ");
+  p = multiply_poly_with_constant(p, mod_coeff);
+  print_polynomial(p, output_file2);
+  fprintf(output_file2, ";\n");
+  update_proof_statistics(p);
+  p->idx = print_idx++;
+  return p;
+}
+
+
+
+static void print_pac_add_rule (int del, Polynomial *p1, Polynomial *p2, Polynomial *p){
+  if (pac_expand) print_pac_add_rule_no_idx (del, p1, p2, p);
+  else print_pac_add_rule_idx (del, p1->idx, p2->idx, p);
+
+}
+
+static void print_pac_mul_rule (int del, Polynomial *p1, Polynomial *p2, Polynomial *p){
+  if (pac_expand) print_pac_mul_rule_no_idx (del, p1, p2, p);
+  else print_pac_mul_rule_idx (del, p1->idx, p2, p);
+}
+
+static Polynomial * print_pac_mul_with_mod_coeff_rule (int del, Polynomial *p){
+  if (pac_expand) p = print_pac_mul_with_mod_coeff_rule_no_idx (del, p);
+  else p = print_pac_mul_with_mod_coeff_rule_idx (p);
+
+  return p;
+}
+
+
+
+/*------------------------------------------------------------------------*/
+static int var_in_term(Var * v, Term * t){
+  while(t){
+    if(t->variable->level > v->level) return 0;
+    if(t->variable == v) return 1;
+    t = t->rest;
+  }
+  return 0;
+}
+
+static int var_in_poly(Var * v, Polynomial * p){
+  Polynomial * p1 = p->rest;
+  while(p1){
+    Term * tmp = p1->lm->term;
+    int found = var_in_term(v, tmp);
+    if(found) return 1;
+    p1 = p1->rest;
+  }
+  return 0;
+}
+
+static int contained (Term * m1, Term * m2){
+  int found = 0;
+  Term * tmp1 = m1;
+
+  while(tmp1){
+    Term * tmp2 = m2;
+    while(tmp2){
+      if(tmp1->variable == tmp2->variable) found = 1;
+      tmp2 = tmp2->rest;
+    }
+    if(!found) return 0;
+    found = 0;
+    tmp1 = tmp1->rest;
+  }
+  return 1;
+}
+
+
+// if term m2 is contained in m1 it calculates the remainder.
+static Term * term_remainder(Term * m1, Term * m2){
+  assert(!num_vstack);
+  Term * dividend = m1;
+  Term * divisor = m2;
+  assert(contained(m2, m1));
+
+  if(m1 == m2) return 0;
+
+  while(divisor){
+    Var * v1 = dividend->variable;
+    Var * v2 = divisor->variable;
+
+    if(v1->level == v2->level){
+      divisor = divisor->rest;
+      dividend = dividend->rest;
+    }
+
+    if(v1->level < v2->level){
+      push_vstack_sorted(v1);
+      dividend = dividend->rest;
+    }
+  }
+
+  while(dividend){
+    push_vstack_sorted(dividend->variable);
+    dividend = dividend->rest;
+  }
+
+  Term * m = build_term_from_stack();
+  return m;
+}
+
+// we divide polynomial p1 by the lm of p2
+static Polynomial * divide_lm(Polynomial * p1, Polynomial * p2){
+  assert(!num_mstack);
+  Term * lm = p2->lm->term;
+
+  Polynomial * tmp = p1;
+
+  while(tmp){
+    Monomial * lm_tmp = tmp->lm;
+    if(contained(lm, lm_tmp->term)){
+      Term * m = term_remainder(lm_tmp->term, lm);
+
+      mpz_t ctmp;
+      mpz_init(ctmp);
+      mpz_cdiv_q(ctmp, lm_tmp->coeff, p2->lm->coeff);
+      mpz_mul_si(ctmp, ctmp, -1);
+      push_mstack_sorted(new_monomial(ctmp, copy_term(m)));
+      mpz_clear(ctmp);
+    }
+    tmp = tmp->rest;
+  }
+  Polynomial * p = build_polynomial_from_stack();
+  return p;
+}
+
+static Polynomial * mod_poly(Polynomial *p1, int elim){
+  assert(!num_mstack);
+  int exp = NN;
+  mpz_t coeff;
+  mpz_init(coeff);
+
+  Polynomial * old_p1 = copy_poly(p1);
+
+  Polynomial * tmp = p1;
+  Polynomial * prev = 0;
+  int found_mod = 0;
+
+  while(tmp){
+      if(pac && elim){
+        mpz_tdiv_q_2exp(coeff, tmp->lm->coeff, exp);
+        if (mpz_cmp_si(coeff, 0) != 0){
+          push_mstack_sorted(new_monomial(coeff, copy_term(tmp->lm->term)));
+          found_mod = 1;
+        }
+      }
+      mpz_tdiv_r_2exp(tmp->lm->coeff, tmp->lm->coeff, exp);
+      if(mpz_cmp_si(tmp->lm->coeff, 0) == 0){
+         if(!prev) p1 = p1->rest;
+         else {
+           prev->rest = tmp->rest;
+
+         }
+         deallocate_monomial(tmp->lm);
+         Polynomial * rest = tmp->rest;
+         deallocate (tmp, sizeof *tmp);
+         tmp = rest;
+
+      } else{
+        prev = tmp;
+        tmp = tmp->rest;
+      }
+  }
+
+
+  if(pac && elim && found_mod){
+      Polynomial * res = build_polynomial_from_stack();
+      res = negate_poly(res);
+
+      res = print_pac_mul_with_mod_coeff_rule(0, res);
+      if(elim < 2) print_pac_add_rule(1, old_p1, res, p1);
+      else print_pac_add_rule(0, old_p1, res, p1);
+
+      deallocate_polynomial(res);
+  }
+
+  mpz_clear(coeff);
+  deallocate_polynomial(old_p1);
+  return p1;
+}
 /*------------------------------------------------------------------------*/
 
 
@@ -2996,37 +2996,6 @@ static void deallocate_slicerem(){
   deallocate(slice_rem, (NN) * (sizeof *slice_rem));
 }
 
-//add up slices chronological
-/*
-static void add_up_slicerem(){
-
-  Polynomial * res = slice_rem[0];
-
-  for(unsigned i = 1; i < slice_rem_count; i++){
-      Polynomial * p = slice_rem[i];
-
-      assert(p);
-      Polynomial * add = add_poly(p,res);
-
-      fprintf(output_file2, "%i d ", print_idx);
-      fprintf(output_file2, "+: %i, %i, ", p->idx, res->idx);
-      print_polynomial(add, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(add);
-      add->idx = print_idx++;
-
-      if(modulo) add  = mod_poly(add, 1);
-      deallocate_polynomial(p);
-      deallocate_polynomial(res);
-
-      res = add;
-
-  }
-  slice_rem[0] = res;
-  slice_rem_count = 1;
-
-}*/
-
 
 
 //add up slices treelike
@@ -3041,15 +3010,9 @@ static void add_up_slicerem(){
       assert(q);
       Polynomial * add = add_poly(p,q);
 
-      fprintf(output_file2, "%i ", print_idx);
-      fprintf(output_file2, "+: %i, %i, ", p->idx, q->idx);
-      print_polynomial(add, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(add);
-      add->idx = print_idx++;
 
-      fprintf(output_file2, "%i d;\n", p->idx);
-      fprintf(output_file2, "%i d;\n", q->idx);
+      if(slice_rem_count > 2) print_pac_add_rule(1, p, q, add);
+      else print_pac_add_rule(0, p, q, add);
 
       if(modulo) add  = mod_poly(add, 1);
 
@@ -3057,24 +3020,18 @@ static void add_up_slicerem(){
       deallocate_polynomial(q);
 
       slice_rem[current_count++] = add;
-
     }
 
-    if(slice_rem_count % 2 ==1){
+    if(slice_rem_count % 2 == 1){
       slice_rem[current_count++] = slice_rem[slice_rem_count-1];
     }
 
-    slice_rem_count=current_count;
+    slice_rem_count = current_count;
     current_count = 0;
 
   }
   assert(slice_rem_count == 1);
-
-
 }
-
-
-
 /*----------------------------------------------------------------------------*/
 
 static Polynomial ** pacrem;
@@ -3091,44 +3048,8 @@ static void deallocate_pacrem(){
   deallocate(pacrem, (M) * (sizeof *pacrem));
 }
 
-// add up pacrem chronologically
-/*
-static void add_up_pacrem(){
-
-  Polynomial * res = pacrem[0];
-
-  for(unsigned i = 1; i < pacrem_count; i++){
-      Polynomial * p = pacrem[i];
-
-      assert(p);
-      Polynomial * add = add_poly(p,res);
-
-      fprintf(output_file2, "%i d ", print_idx);
-      fprintf(output_file2, "+: %i, %i, ", p->idx, res->idx);
-      print_polynomial(add, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(add);
-      add->idx = print_idx++;
-
-      if(modulo) add  = mod_poly(add, 1);
-      deallocate_polynomial(p);
-      deallocate_polynomial(res);
-
-      res = add;
-
-  }
-
-  slice_rem[slice_rem_count++] = copy_poly(res);
-  deallocate_polynomial(res);
-  pacrem_count = 0;
-
-}*/
-
-
-
 // add up pacrem treewise
 static void add_up_pacrem(){
-//  fprintf(output_file2, "add up pacrem \n");
   unsigned current_count = 0;
   while(pacrem_count > 1){
     for(unsigned i = 0; i < pacrem_count/2; i++){
@@ -3139,15 +3060,7 @@ static void add_up_pacrem(){
       assert(q);
       Polynomial * add = add_poly(p,q);
 
-      fprintf(output_file2, "%i ", print_idx);
-      fprintf(output_file2, "+: %i, %i, ", p->idx, q->idx);
-      print_polynomial(add, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(add);
-      add->idx = print_idx++;
-
-      fprintf(output_file2, "%i d;\n", p->idx);
-      fprintf(output_file2, "%i d;\n", q->idx);
+      print_pac_add_rule(1, p, q, add);
 
       if(modulo) add  = mod_poly(add, 1);
       deallocate_polynomial(p);
@@ -3162,19 +3075,15 @@ static void add_up_pacrem(){
 
     pacrem_count = current_count;
     current_count = 0;
-
-
   }
 
   assert(pacrem_count == 1);
   slice_rem[slice_rem_count++] = copy_poly(pacrem[0]);
   deallocate_polynomial(pacrem[0]);
   pacrem_count = 0;
-//  fprintf(output_file2, "done add up pacrem \n");
-
 }
-/*------------------------------------------------------------------------*/
 
+/*------------------------------------------------------------------------*/
 typedef struct Slice Slice;
 
 struct Slice {
@@ -3182,7 +3091,6 @@ struct Slice {
   Var ** vars;      // vars assigned to slice
   Polynomial ** poly;
   int maxlevel;
-
 };
 
 static Slice * slices;
@@ -3233,7 +3141,6 @@ static void level_to_order(){
   }
 
   //b is bigger than a
-
     for (int i = N-1; i >= 0; i--){
       Var * v = var (blit (i));
       v->level = order++;
@@ -3241,14 +3148,11 @@ static void level_to_order(){
 
     }
 
-
   for (int i = N-1; i >= 0; i--){
     Var * v = var (alit (i));
     v->level = order++;
     if(verbose >=4) msg("variable %s has level %i", v->name, v->level);
-
   }
-
 
   msg("ordered %i variables", order);
 }
@@ -3281,9 +3185,6 @@ static void print_circuit_poly(){
 }
 
 
-
-
-
 static void init_slices(){
   allocate_slices();
   for (int i = 0; i < (int) NN; i++) {
@@ -3303,41 +3204,6 @@ static void init_slices(){
 }
 
 
-
-/*static void multiply_slices(){
-  mpz_t base;
-  mpz_init(base);
-  mpz_set_ui(base,2);
-
-  mpz_t mod;
-  mpz_init(mod);
-
-
-  for (int i = NN - 1; i > 0; i--) {
-    mpz_pow_ui(mod, base, i);
-    Slice * S = slices + i;
-
-    for (unsigned j = 0; j < S->size; j++){
-      Polynomial * p = S->poly[j];
-      if(pac) {
-        fprintf(output_file2, "%i d ", print_idx);
-        fprintf(output_file2, "*: %i, ", p->idx);
-        mpz_out_str(output_file2, 10, mod);
-        fprintf(output_file2, ", ");
-      }
-      p = multiply_poly_with_constant(p, mod);
-      if(pac){
-        print_polynomial(p, output_file2);
-        fprintf(output_file2, ";\n");
-        update_proof_statistics(p);
-        p->idx = print_idx++;
-      }
-    }
-  }
-  mpz_clear(base);
-  mpz_clear(mod);
-}*/
-
 static void deallocate_slices(){
   for(unsigned i = 0; i < NN; i++){
     Slice * S = slices + i;
@@ -3355,31 +3221,9 @@ static void deallocate_slices(){
 Polynomial * pac_rem = 0;
 
 
-static int var_in_term(Var * v, Term * t){
-  while(t){
-    if(t->variable->level > v->level) return 0;
-    if(t->variable == v) return 1;
-    t = t->rest;
-  }
-  return 0;
-}
-
-
-static int var_in_poly(Var * v, Polynomial * p){
-  Polynomial * p1 = p->rest;
-  while(p1){
-    Term * tmp = p1->lm->term;
-    int found = var_in_term(v, tmp);
-    if(found) return 1;
-    p1 = p1->rest;
-  }
-  return 0;
-}
-
 // int elim: 0 for reduction
 // 1 for decompose
 // 2 for eliminate
-
 static Polynomial * reduce_by_one_poly(Polynomial * p1, Polynomial * p2, int elim){
   Polynomial * negfactor = divide_lm(p1, p2);
   Polynomial * mult   = multiply_poly(negfactor, p2);
@@ -3390,50 +3234,17 @@ static Polynomial * reduce_by_one_poly(Polynomial * p1, Polynomial * p2, int eli
   //eg in decomposing
   if(pac && elim > 0){
     if(!is_one_poly(negfactor)){
-      fprintf(output_file2, "%i ", print_idx);
-
-
-      fprintf(output_file2, "*: %i, ", p2->idx);
-      print_polynomial(negfactor, output_file2); fprintf(output_file2, ", ");
-      print_polynomial(mult, output_file2);
-      fprintf(output_file2, ";\n");
-
-      if(elim < 2){
-        fprintf(output_file2, "%i d;\n", p2->idx);
-      }
-
-
-      update_proof_statistics(mult);
-      mult->idx = print_idx++;
-
+      if(elim < 2) print_pac_mul_rule(1, p2, negfactor, mult);
+      else print_pac_mul_rule(0, p2, negfactor, mult);
     }
-
-
-
-    fprintf(output_file2, "%i ", print_idx);
-    fprintf(output_file2, "+: %i, %i, ", p1->idx, mult->idx);
-    print_polynomial(rem, output_file2);
-    fprintf(output_file2, ";\n");
-    update_proof_statistics(rem);
-
-    if(elim < 2){
-      fprintf(output_file2, "%i d;\n", p1->idx);
-      fprintf(output_file2, "%i d;\n", mult->idx);
-    }
-
-    rem->idx = print_idx++;
+    if(elim < 2) print_pac_add_rule(1, p1, mult, rem);
+    else print_pac_add_rule(0, p1, mult, rem);
   }
+
   else if(pac){
-
     if(!is_one_poly(negfactor)){
-      fprintf(output_file2, "%i *: %i, ", print_idx, p2->idx);
-      print_polynomial(negfactor, output_file2); fprintf(output_file2, ", ");
-      print_polynomial(mult, output_file2);
-      fprintf(output_file2, ";\n");
-      update_proof_statistics(mult);
-      mult->idx = print_idx++;
-
-      fprintf(output_file2, "%i d;\n", p2->idx);
+      if(elim < 2) print_pac_mul_rule(1, p2, negfactor, mult);
+      else print_pac_mul_rule(0, p2, negfactor, mult);
     }
      if(mult) pacrem[pacrem_count++] = copy_poly(mult);
 
@@ -3472,16 +3283,13 @@ static void eliminate_var_in_multiple_slices(Var * v, Polynomial * p, unsigned s
         S->poly[j] = reduce_by_one_poly(res, p, 2);
         assert(S->poly[j]);
         deallocate_polynomial(res);
-
-
       }
     }
   }
-  if(pac) {
-    fprintf(output_file2, "\n%i d;\n\n", p->idx);
+  if(pac && !pac_expand) {
+    print_pac_del_rule_idx(p->idx);
   }
 }
-
 
 static void delete_var_from_slice(Slice * S, unsigned index){
   for(unsigned j = index; j < S->size -1; j++){
@@ -3536,9 +3344,6 @@ static void decomposing(){
   }
 }
 
-
-
-// repeated
 static void eliminating(){
   unsigned elim_count = 0;
   for (int i = NN-1; i >= 0; i--) {
@@ -3556,7 +3361,6 @@ static void eliminating(){
           deallocate_polynomial(p);
           change = 1;
           elim_count++;
-
         }
       }
     }
@@ -3567,6 +3371,118 @@ static void eliminating(){
     msg("after eliminating we received: ");
     print_circuit_poly();
   }
+}
+/*------------------------------------------------------------------------*/
+static void correct_pp_unsigned(){
+  Polynomial * p;
+  p = slice_rem[0];
+  assert(p);
+  Polynomial *pp = p;
+
+  mpz_t minus_one;
+  mpz_init(minus_one);
+  mpz_set_si(minus_one, -1);
+
+  mpz_t one;
+  mpz_init(one);
+  mpz_set_si(one, 1);
+
+  while(p){
+    Monomial * m = p->lm;
+    Term * t = m->term;
+
+    if((incremental && mpz_cmp_si(m->coeff, 0) < 0) ||
+       (!incremental && mpz_cmp_si(m->coeff, 0) > 0)){
+      int flag = 0;
+      while(t && !flag){
+        Var * v = t->variable;
+        if(!v->input) flag = 1;
+        t = t->rest;
+      }
+
+      if(!flag){
+        Monomial * tmp;
+        if(incremental) tmp = new_monomial(one, copy_term(m->term));
+        else tmp = new_monomial(minus_one, copy_term(m->term));
+        push_mstack_sorted(tmp);
+      }
+    }
+    p = p->rest;
+  }
+
+  mpz_clear(minus_one);
+  mpz_clear(one);
+
+  Polynomial * factor = build_polynomial_from_stack();
+  if(!factor) return;
+
+  factor = print_pac_mul_with_mod_coeff_rule(1, factor);
+
+  Polynomial * add = add_poly(factor, pp);
+  print_pac_add_rule(0, factor, pp, add);
+
+  deallocate_polynomial(factor);
+  deallocate_polynomial(add);
+}
+
+
+static void correct_pp_signed(){
+  Polynomial * p;
+  p = slice_rem[0];
+  assert(p);
+  Polynomial *pp = p;
+
+  mpz_t minus_one;
+  mpz_init(minus_one);
+  mpz_set_si(minus_one, -1);
+
+  mpz_t one;
+  mpz_init(one);
+  mpz_set_si(one, 1);
+
+  mpz_t half_mod;
+  mpz_init(half_mod);
+  mpz_tdiv_q_ui(half_mod, mod_coeff, 2);
+
+  mpz_t half_mod_neg;
+  mpz_init(half_mod_neg);
+  mpz_mul_si(half_mod_neg, half_mod, -1);
+
+  while(p){
+    Monomial * m = p->lm;
+
+    if((incremental && mpz_cmp(m->coeff, half_mod)>0) ){
+      Monomial * tmp = new_monomial(minus_one, copy_term(m->term));
+      push_mstack_sorted(tmp);
+    }
+    else if((incremental && mpz_cmp(m->coeff, half_mod_neg)<0) ){
+      Monomial * tmp = new_monomial(one, copy_term(m->term));
+      push_mstack_sorted(tmp);
+    }
+    p = p->rest;
+  }
+
+  mpz_clear(minus_one);
+  mpz_clear(one);
+  mpz_clear(half_mod);
+  mpz_clear(half_mod_neg);
+
+  Polynomial * factor = build_polynomial_from_stack();
+  if(!factor) return;
+
+  factor = print_pac_mul_with_mod_coeff_rule(1, factor);
+
+
+  Polynomial * add = add_poly(factor, pp);
+  print_pac_add_rule(0, factor, pp, add);
+
+  deallocate_polynomial(factor);
+  deallocate_polynomial(add);
+}
+
+static void correct_pp(){
+  if(tc) correct_pp_signed();
+  else correct_pp_unsigned();
 }
 /*------------------------------------------------------------------------*/
 static Polynomial * non_inc_spec(){
@@ -3585,7 +3501,6 @@ static Polynomial * non_inc_spec(){
     Term * t1 = new_term(v, 0);
     Monomial * m1 = new_monomial(coeff, t1);
     push_mstack_sorted(m1);
-
   }
 
   for (int i = N-1; i >= 0; i--){
@@ -3608,7 +3523,6 @@ static Polynomial * non_inc_spec(){
   mpz_clear(base);
 
   Polynomial * res = build_polynomial_from_stack();
-
   return res;
 
 }
@@ -3622,8 +3536,6 @@ static Polynomial * non_inc_twos_comp_spec(){
   mpz_init(base);
   mpz_set_ui(base, 2);
 
-
-
   for (int i = NN-1; i >= 0; i--) {
     mpz_pow_ui(coeff, base, i);
     if(i != (int)NN-1) mpz_mul_si(coeff, coeff, -1);
@@ -3632,12 +3544,11 @@ static Polynomial * non_inc_twos_comp_spec(){
     Term * t1 = new_term(v, 0);
     Monomial * m1 = new_monomial(coeff, t1);
     push_mstack_sorted(m1);
-
   }
 
-  for (int i = N-1; i >= 0; i--){
+  for (int i = N-1; i >= 0; i--) {
     Var * v = var (blit (i));
-    for (int j = N-1; j >= 0; j--){
+    for (int j = N-1; j >= 0; j--) {
       if(truncated &&  i+j > (int) N-1) continue;
       Var * w = var (alit (j));
       mpz_pow_ui(coeff, base, i+j);
@@ -3649,7 +3560,6 @@ static Polynomial * non_inc_twos_comp_spec(){
       Term * t1 = build_term_from_stack();
       Monomial * m1 = new_monomial(coeff, t1);
       push_mstack_sorted(m1);
-
     }
   }
 
@@ -3666,7 +3576,7 @@ static Polynomial * generate_non_inc_spec(){
   else return non_inc_spec();
 }
 
-static void reducing_non_inc(){
+static Polynomial * reducing_non_inc(){
   msg("final reduction started");
   Polynomial * spec = generate_non_inc_spec();
 
@@ -3694,10 +3604,11 @@ static void reducing_non_inc(){
   fputs_unlocked(";\n", stdout);
   msg(" ");
 
-  if(spec) die ("incorrect multiplier");
-  msg("CORRECT MULTIPLIER");
+  if(pac) add_up_slicerem();
+  if(pac && modulo) correct_pp();
 
-  deallocate_polynomial(spec);
+  return spec;
+
 }
 /*------------------------------------------------------------------------*/
 static Polynomial * inc_spec(int index){
@@ -3798,7 +3709,7 @@ static Polynomial * generate_inc_spec(int index){
 }
 
 
-static void reducing_inc(){
+static Polynomial * reducing_inc(){
   msg("final reduction started");
   Polynomial * spec = 0;
 
@@ -3855,9 +3766,6 @@ static void reducing_inc(){
       assert(!slice_rem[slice_rem_count]);
       add_up_pacrem();
       assert(pacrem_count == 0);
-
-      //slice_rem[slice_rem_count++] = pac_rem;
-      //pac_rem = 0;
     }
   }
 
@@ -3867,165 +3775,16 @@ static void reducing_inc(){
   fputs_unlocked(";\n", stdout);
   msg(" ");
 
-  if(spec) die ("incorrect multiplier");
-  msg("CORRECT MULTIPLIER");
+  if(pac) add_up_slicerem();
+  if(pac && modulo) correct_pp();
 
-  deallocate_polynomial(spec);
+  return spec;
 }
 /*------------------------------------------------------------------------*/
 
-static void correct_pp_unsigned(){
-  //fprintf(output_file2, "correct pp\n\n");
-  Polynomial * p;
-  p = slice_rem[0];
-  assert(p);
-  Polynomial *pp = p;
-
-  mpz_t minus_one;
-  mpz_init(minus_one);
-  mpz_set_si(minus_one, -1);
-
-  mpz_t one;
-  mpz_init(one);
-  mpz_set_si(one, 1);
-
-  while(p){
-    Monomial * m = p->lm;
-    Term * t = m->term;
-
-    if((incremental && mpz_cmp_si(m->coeff, 0)<0) ||
-       (!incremental && mpz_cmp_si(m->coeff, 0)>0)){
-      int flag = 0;
-      while(t && !flag){
-        Var * v = t->variable;
-        if(!v->input) flag = 1;
-        t = t->rest;
-      }
-
-      if(!flag){
-        Monomial * tmp;
-        if(incremental) tmp = new_monomial(one, copy_term(m->term));
-        else tmp = new_monomial(minus_one, copy_term(m->term));
-        push_mstack_sorted(tmp);
-      }
-    }
-    p = p->rest;
-  }
-
-  mpz_clear(minus_one);
-  mpz_clear(one);
-
-  Polynomial * factor = build_polynomial_from_stack();
-  if(!factor) return;
-  fprintf(output_file2, "%i ", print_idx);
-  fprintf(output_file2, "*: 1, ");
-  print_polynomial(factor, output_file2);     fprintf(output_file2, ", ");
-  factor = multiply_poly_with_constant(factor, mod_coeff);
-  print_polynomial(factor, output_file2);
-  fprintf(output_file2, ";\n");
-  fprintf(output_file2, "1 d;\n");
-
-  update_proof_statistics(factor);
-  factor->idx = print_idx++;
-
-  Polynomial * add = add_poly(factor, pp);
-  fprintf(output_file2, "%i ", print_idx);
-  fprintf(output_file2, "+: %i, %i, ", factor->idx, pp->idx);
-  print_polynomial(add, output_file2);
-  fprintf(output_file2, ";\n");
-  update_proof_statistics(add);
-  add->idx = print_idx++;
-
-  fprintf(output_file2, "%i d;\n", factor->idx);
-  fprintf(output_file2, "%i d;\n", pp->idx);
-
-
-  deallocate_polynomial(factor);
-  deallocate_polynomial(add);
-
-}
-
-
-static void correct_pp_signed(){
-  //fprintf(output_file2, "correct pp\n\n");
-  Polynomial * p;
-  p = slice_rem[0];
-  assert(p);
-  Polynomial *pp = p;
-
-  mpz_t minus_one;
-  mpz_init(minus_one);
-  mpz_set_si(minus_one, -1);
-
-  mpz_t one;
-  mpz_init(one);
-  mpz_set_si(one, 1);
-
-  mpz_t half_mod;
-  mpz_init(half_mod);
-  mpz_tdiv_q_ui(half_mod, mod_coeff, 2);
-
-  mpz_t half_mod_neg;
-  mpz_init(half_mod_neg);
-  mpz_mul_si(half_mod_neg, half_mod, -1);
-
-  while(p){
-    Monomial * m = p->lm;
-
-    if((incremental && mpz_cmp(m->coeff, half_mod)>0) ){
-      Monomial * tmp = new_monomial(minus_one, copy_term(m->term));
-      push_mstack_sorted(tmp);
-    }
-    else if((incremental && mpz_cmp(m->coeff, half_mod_neg)<0) ){
-      Monomial * tmp = new_monomial(one, copy_term(m->term));
-      push_mstack_sorted(tmp);
-    }
-    p = p->rest;
-  }
-
-  mpz_clear(minus_one);
-  mpz_clear(one);
-  mpz_clear(half_mod);
-  mpz_clear(half_mod_neg);
-
-  Polynomial * factor = build_polynomial_from_stack();
-  if(!factor) return;
-  fprintf(output_file2, "%i ", print_idx);
-  fprintf(output_file2, "*: 1, ");
-  print_polynomial(factor, output_file2);     fprintf(output_file2, ", ");
-  factor = multiply_poly_with_constant(factor, mod_coeff);
-  print_polynomial(factor, output_file2);
-  fprintf(output_file2, ";\n");
-  update_proof_statistics(factor);
-  factor->idx = print_idx++;
-  fprintf(output_file2, "1 d;\n");
-
-  Polynomial * add = add_poly(factor, pp);
-  fprintf(output_file2, "%i ", print_idx);
-  fprintf(output_file2, "+: %i, %i, ", factor->idx, pp->idx);
-  print_polynomial(add, output_file2);
-  fprintf(output_file2, ";\n");
-  update_proof_statistics(add);
-  add->idx = print_idx++;
-
-
-  fprintf(output_file2, "%i d;\n", factor->idx);
-  fprintf(output_file2, "%i d;\n", pp->idx);
-
-
-  deallocate_polynomial(factor);
-  deallocate_polynomial(add);
-
-}
-
-static void correct_pp(){
-  if(tc) correct_pp_signed();
-  else correct_pp_unsigned();
-}
-/*------------------------------------------------------------------------*/
 static void print_circuit_poly_to_file(){
   if(modulo){
-    fprintf(output_file, "%i ", print_idx);
+    if(!pac_expand) fprintf(output_file, "%i ", print_idx);
     mpz_out_str(output_file, 10, mod_coeff);
     fprintf(output_file, ";\n");
     print_idx ++;
@@ -4036,14 +3795,12 @@ static void print_circuit_poly_to_file(){
     for (unsigned j = 0; j < S->size; j++){
       Polynomial * p = S->poly[j];
 
-      fprintf(output_file, "%i ", print_idx);
+      if(!pac_expand) fprintf(output_file, "%i ", print_idx);
       print_polynomial( p, output_file);
       fprintf(output_file, ";\n");
       p->idx = print_idx ++;
-
     }
   }
-
 }
 
 static void print_spec_to_file(){
@@ -4054,6 +3811,80 @@ static void print_spec_to_file(){
   fprintf(output_file3, ";\n");
   deallocate_polynomial(p);
 }
+/*------------------------------------------------------------------------*/
+// Generating Counter examples
+
+static void write_witness_vector(Term * t, FILE * file){
+  msg_no_nl ("  ");
+  for(unsigned i = 0; i <= N-1; i++){
+    Var * v = var(alit(i));
+    if(var_in_term(v, t)) {
+      fprintf(file, "1");
+      fprintf(stdout, "%s = ",v->name);
+    }
+    else fprintf(file, "0");
+
+    v = var(blit(i));
+    if(var_in_term(v, t)) {
+      fprintf(file, "1");
+      fprintf(stdout, "%s = ",v->name);
+    }
+    else fprintf(file, "0");
+  }
+  fprintf(stdout, "1, remaining inputs = 0;\n");
+  fprintf(file, "\n");
+}
+
+static void write_witnesses(Polynomial * p, FILE * file){
+  int len = get_min_term_size(p);
+
+  while(p){
+    int tlen = term_size(p->lm->term);
+    if(tlen == len) write_witness_vector(p->lm->term, file);
+    p = p->rest;
+  }
+  fprintf(file, ".");
+}
+
+static void generate_witness(Polynomial * p){
+  if(!check_poly_inputs_only(p))
+    die ("cannot generate witness, as remainder polynomial contains non-inputs");
+
+  char witness_name[100];
+  memset(witness_name, '\0', sizeof(witness_name));
+  for (int i = 0; input_name[i] != '.'; i++) {
+      witness_name[i] = input_name[i];
+  }
+  strcat(witness_name, ".wit");
+
+
+  FILE * witness_file;
+  if (!(witness_file = fopen (witness_name, "w")))
+    die ("cannot write output to '%s'", witness_name);
+
+  msg ("");
+  msg ("COUNTER EXAMPLES ARE: ");
+
+  write_witnesses(p, witness_file);
+
+  msg ("");
+  msg ("");
+  msg ("Counter examples are written to %s", witness_name);
+  msg ("Call ");
+  msg ("       'aiger/aigsim %s %s' ", input_name, witness_name);
+  msg ("to simulate the output of the multiplier for the provided counter example(s).");
+  msg ("");
+  msg_no_nl ("aiger/aigsim produces output in the form:");
+  if (N == 1)      fprintf(stdout, "  a[0]b[0]  s[0]\n");
+  else if (N == 2) fprintf(stdout, "  a[0]b[0]a[1]b[1]  s[0]s[1]s[2]s[3]\n");
+  else
+    fprintf(stdout, "  a[0]b[0]a[1]b[1]...a[%d]b[%d]  s[0]s[1]s[2]...s[%d]\n", N-1, N-1, NN-1);
+
+  fclose(witness_file);
+}
+
+
+
 /*------------------------------------------------------------------------*/
 // init hashfunction
 static void init() {
@@ -4121,12 +3952,29 @@ int main (int argc, char ** argv) {
       modus = 3;
     } else if (!strcmp (argv[i], "-2comp")) {
       tc = 1;
+    } else if (!strcmp (argv[i], "-swap")) {
+      msg("using swapped inputs and alternative variable names");
+      swap = 1;
     } else if (!strcmp (argv[i], "-non-inc")) {
       incremental = 0;
     } else if (!strcmp (argv[i], "-no-mod")) {
       modulo = 0;
     } else if (!strcmp (argv[i], "-no-elim")) {
       elim = 0;
+    } else if (!strcmp (argv[i], "-no-counter-examples")) {
+      gen_counter_ex = 0;
+    } else if (!strcmp (argv[i], "-expanded-pac")) {
+      pac_expand = 1;
+    } else if (!strcmp (argv[i], "-print_idx")) {
+      i++;
+      if (i == argc)
+        die("after '-print_idx' you need to provide a positive integer value");
+
+      if(is_number(argv[i])){
+        init_print_idx = atoi(argv[i]);
+        print_idx = init_print_idx;
+      }
+      else die("after '-print_idx' you need to provide a positive integer value");
     } else if (!strcmp (argv[i], "-v1")) {
       verbose = 1;
     } else if (!strcmp (argv[i], "-v2")) {
@@ -4162,6 +4010,11 @@ int main (int argc, char ** argv) {
   } else if (modus == 3){
     if (!output_name3) die ("too few arguments (try '-h')");
     pac = 1;
+  }
+
+  if(!pac && pac_expand) {
+    msg ("Warning: Option '-pac_expand' only works in modus '-certify' ");
+    pac_expand = 0;
   }
 
 
@@ -4226,8 +4079,6 @@ int main (int argc, char ** argv) {
       print_spec_to_file();
     }
 
-    //multiply_slices();
-
     if(verbose >= 3) {
       msg("after sorting we received: ");
       print_circuit_poly();
@@ -4236,27 +4087,27 @@ int main (int argc, char ** argv) {
 
 
     if(elim) decomposing();
-
     double decomp_time = process_time() -  slice_time;
 
     if (elim && found_booth) eliminating();
     double elim_time = process_time() - decomp_time  - slice_time;
 
 
-    // reduction
-    if(incremental) reducing_inc();
-    else reducing_non_inc();
-
-
-
-
-    if(pac) add_up_slicerem();
-
-    if(pac && modulo) correct_pp();
+    Polynomial * spec;
+    if(incremental) spec = reducing_inc();
+    else spec = reducing_non_inc();
     double red_time = process_time() - elim_time - decomp_time  - slice_time;
 
+    if(spec) {
+      msg ("INCORRECT MULTIPLIER");
+      if(gen_counter_ex) generate_witness(spec);
+    }
+    else {
+      msg("CORRECT MULTIPLIER");
+      print_statistics (slice_time, decomp_time, elim_time, red_time);
+    }
+    deallocate_polynomial(spec);
 
-    print_statistics (slice_time, decomp_time, elim_time, red_time);
     reset_all();
   }
 
