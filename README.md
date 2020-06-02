@@ -31,3 +31,22 @@ In Vampire 2018 and Vampire 2019. The 5th and 6th Vampire Workshops, pages 1-18,
 
 
 Daniela Kaufmann
+
+------------------------------------------------------------------------------------------------------
+02.06.2020 AMulet Version 3:
+Added features:
+  - Option '-nss': to generate Nullstellensatz proofs instead of PAC proofs
+
+11.05.2020 AMulet Version 2:
+Added features:
+  - Counter examples are generated whenever the final remainder is not 0.
+  - Option '-swap' swaps input bitvectors a,b and uses alternative names for internal variables. 
+  - Option '-expanded-pac' can be used to generate PAC proofs, where antecedents are extended. 
+  - Option '-print_idx <int>' allows to manually set the start of the index counter for PAC proofs.
+
+19.03.2020 AMulet Version 1:
+Initial commit.
+
+
+
+
