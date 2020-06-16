@@ -33,6 +33,10 @@ In Vampire 2018 and Vampire 2019. The 5th and 6th Vampire Workshops, pages 1-18,
 Daniela Kaufmann
 
 ------------------------------------------------------------------------------------------------------
+16.06.2020 AMulet Version 4:
+Fixed:
+  - Fixed bugs in adder substitution for signed multipliers.
+
 02.06.2020 AMulet Version 3:
 Added features:
   - Option '-nss': to generate Nullstellensatz proofs instead of PAC proofs
