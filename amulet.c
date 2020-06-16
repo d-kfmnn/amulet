@@ -1,7 +1,7 @@
 /*------------------------------------------------------------------------*/
 /* Copyright (C) 2019,2020 Daniela Kaufmann, Johannes Kepler University Linz */
 /*------------------------------------------------------------------------*/
-#define VERSION "003"
+#define VERSION "004"
 
 static const char * USAGE =
 "\n"
@@ -133,9 +133,10 @@ static unsigned pp;       //number of pp in aig
 static unsigned max_count = 0;
 static unsigned max_idx = 0;
 static int restart = 0;
-static int tc = 0;
+static int signed_mult = 0;
 mpz_t mod_coeff;
 static int found_booth = 0;
+static int single_gen_node = 0;
 
 static int proof_rules = 0;
 static int proof_size = 0;
@@ -469,7 +470,7 @@ static void init_aiger_with_checks(){
   if ((model->num_inputs & 1)) die ("odd number of inputs");
   if (!model->num_outputs) die ("no outputs");
   if (2*model->num_outputs == model->num_inputs){
-    if(tc) die("truncated and two's complement does not work");
+    if(signed_mult) die("verification of truncated signed multiplier is not implemented");
 
     msg("found truncated multiplier: N * N = N");
     M = model->maxvar + 1;
@@ -673,8 +674,11 @@ struct Var {
   int haand;
   int hainp;
 
+  int fsa;	       // 1 if it seems to be gp adder
+  int fsa_inp;   // 1 if it seems to be input of gp adder
+  int prop_gen_node;
+
   int bo;	         // 1 if it was eliminated during booth recoding
-  int cl;	         // 1 if it seems to be gp adder
   int pp;          // determines if pp
   int neg;         // determines if Var is negation
 
@@ -707,7 +711,9 @@ static void allocate_variables(){
 
     v->xor = 0;
     v->bo = 0;
-    v->cl = 0;
+    v->fsa = 0;
+    v->fsa_inp = 0;
+    v->prop_gen_node = 0;
     v->pp = 0;
     v->neg = 0;
 
@@ -903,46 +909,31 @@ static Var * xor_right_child (Var * v) {
 static void set_ha(){
   for (unsigned i = 1; i < M; i++) {
     Var * v = vars + i;
+
     if(v->xor != 1) continue;
 
     Var * l = xor_left_child(v);
     Var * r = xor_right_child(v);
     if(l->occs < 3 || r->occs < 3) continue;
+    Parent * l_par=l->parent;
+    int found = 0;
 
-    if(l->occs != 3 && r->occs != 3) continue;
-    Parent * p;
-    if(l->occs == 3){
-      int found = 0;
-      p = l->parent;
-      while(var(p->pval)->xor == 2){
-        p = p->rest;
+    while(l_par && !found){
+      if(var(l_par->pval)->xor != 2){
+        Parent * r_par=r->parent;
+        while(r_par && !found){
+          if(l_par->pval == r_par->pval) {
+            var(l_par->pval)->haand = ++ha_num;
+            found = 1;
+            break;
+          }
+          else r_par = r_par->rest;
+        }
       }
-      assert(p);
-
-      Parent * q = r->parent;
-      while(q){
-        if(p->pval == q->pval) found = 1;
-        q = q->rest;
-      }
-      if(!found) continue;
-    } else if (r->occs == 3){
-      int found = 0;
-      p = r->parent;
-      while(var(p->pval)->xor == 2){
-        p = p->rest;
-      }
-      assert(p);
-
-      Parent * q = l->parent;
-      while(q){
-        if(p->pval == q->pval) found = 1;
-        q = q->rest;
-      }
-      if(!found) continue;
+      l_par = l_par->rest;
     }
 
-    v->haxor = ++ha_num;
-    var(p->pval)->haand = ha_num;
+    v->haxor = ha_num;
     l->hainp = ha_num;
     r->hainp = ha_num;
   }
@@ -1074,21 +1065,13 @@ static void input_cone(unsigned lit, int num){
 
 /*****************************************************************************/
 static Var * adder_carry_out;
-static unsigned size_pg;
-static unsigned pg_num = 0;
-static unsigned * pg;
-
 static unsigned size_cin;
 static unsigned cin_num = 0;
 static unsigned * cin;
 
-static unsigned size_inputs;
-static unsigned inputs_num = 0;
+static int size_inputs;
+static int inputs_num = 0;
 static unsigned * inputs;
-
-static unsigned size_seen;
-static unsigned seen_num = 0;
-static unsigned * seen;
 
 static unsigned size_o1;
 static unsigned o1_count = 0;
@@ -1097,7 +1080,6 @@ static unsigned * o1;
 static unsigned size_o2;
 static unsigned o2_count = 0;
 static unsigned * o2;
-
 
 static unsigned c_in;
 
@@ -1135,14 +1117,6 @@ static void print_o2 () {
 
 static void deallocate_o2 () { DEALLOCATE (o2, size_o2); }
 
-// make buffer bigger
-static void enlarge_seen () {
-  size_t new_size_seen = size_seen ? 2*size_seen : 1;
-  REALLOCATE (seen, size_seen, new_size_seen);
-  size_seen = new_size_seen;
-}
-static void deallocate_seen () { DEALLOCATE (seen, size_seen); }
-
 static void enlarge_inputs () {
   size_t new_size_inputs = size_inputs ? 2*size_inputs : 1;
   REALLOCATE (inputs, size_inputs, new_size_inputs);
@@ -1156,16 +1130,6 @@ static void enlarge_cin () {
   size_cin = new_size_cin;
 }
 static void deallocate_cin () { DEALLOCATE (cin, size_cin); }
-
-
-
-static void enlarge_pg () {
-  size_t new_size_pg = size_pg ? 2*size_pg : 1;
-  REALLOCATE (pg, size_pg, new_size_pg);
-  size_pg = new_size_pg;
-}
-
-static void deallocate_pg () { DEALLOCATE (pg, size_pg); }
 
 
 static void declare_carry_out_of_adder(){
@@ -1198,17 +1162,15 @@ static int declare_possible_P_and_cin(){
     if(v->output ==  cmp-1 && xor->haxor == -1) return 0;
     if(xor->occs < 4 && v->slice < 3*cmp/4) continue;
     if(xor->occs < 3) continue;
-    if (size_pg == pg_num) enlarge_pg ();
-    pg[pg_num++] = xor->aiger;
-    if(verbose >= 1)  msg("found propagate node %i", pg[pg_num-1]);
+    xor->prop_gen_node = 1;
+    if(verbose >= 1)  msg("found propagate node %s", xor->name);
 
     if(xor->haxor != 0){
       for(unsigned j = M-1; j>0; j--){
         Var * w = vars + j;
         if(w->haand == xor->haxor && w->slice == xor->slice +1){
-          if (size_pg == pg_num) enlarge_pg ();
-          pg[pg_num++] = w->aiger;
-          if(verbose >= 1) msg("found generate node %i", pg[pg_num-1]);
+          w->prop_gen_node = 1;
+          if(verbose >= 1) msg("found generate node %s", w->name);
 
           aiger_and * par = aiger_is_and(model, w->aiger);
           Var * g_0 = var(par->rhs0);
@@ -1217,20 +1179,26 @@ static int declare_possible_P_and_cin(){
 
           g_0->neg = aiger_sign(par->rhs0);
           g_1->neg = aiger_sign(par->rhs1);
+
+
           if (size_inputs == inputs_num) enlarge_inputs ();
           inputs[inputs_num++] = g_0->aiger;
+          g_0->fsa = 1;
+          g_0->fsa_inp++;
+
           if (size_inputs == inputs_num) enlarge_inputs ();
           inputs[inputs_num++] = g_1->aiger;
-
+          g_1->fsa = 1;
+          g_1->fsa_inp++;
           break;
         }
       }
     } else {
-      msg ("enter else branch with xor %s", xor->name);
       if (size_inputs == inputs_num) enlarge_inputs ();
       inputs[inputs_num++] = xor->aiger;
-      xor->cl =2;
-
+      xor->fsa = 1;
+      xor->fsa_inp = 1;
+      single_gen_node = 1;
     }
     c_in = l->xor ? r->aiger : l->aiger;
     if(var(c_in)->slice < cmp) {
@@ -1241,19 +1209,12 @@ static int declare_possible_P_and_cin(){
     }
 
     aiger_and * and = aiger_is_and(model, v->aiger);
-    var(aiger_strip(and->rhs0))->cl = 1;
-    var(aiger_strip(and->rhs1))->cl = 1;
-    v->cl = 1;
+    var(aiger_strip(and->rhs0))->fsa = 1;
+    var(aiger_strip(and->rhs1))->fsa = 1;
+    v->fsa = 1;
 
   }
   return 1;
-}
-
-static int is_in_pg(unsigned val){
-  for(unsigned i=0; i < pg_num; i++){
-    if (pg[i] == val) return 1;
-  }
-  return 0;
 }
 
 static int is_in_cin(unsigned val){
@@ -1263,63 +1224,36 @@ static int is_in_cin(unsigned val){
   return 0;
 }
 
-static int is_in_seen(unsigned val){
-  for(unsigned i=0; i < seen_num; i++){
-    if (seen[i] == val) return 1;
-  }
-  return 0;
-}
-
 
 
 static int follow_path(unsigned val){
-  if(verbose >= 2)  msg("follow path starting with %i", val);
-  if (size_seen == seen_num) enlarge_seen ();
-  seen[seen_num++] = val;
-  unsigned i = 0;
-  while(i != seen_num){
-    Var * v = var(seen[i]);
-    if((v->input || v->hainp > 0) && !is_in_cin(v->aiger)) return 0;
+  Var * v = var(val);
 
+  //check that I reached adder input, which is faulty
+  if((v->input || v->hainp > 0) && !is_in_cin(v->aiger)) return 0;
+  v->fsa = 1;
 
-    aiger_and * and = aiger_is_and(model, v->aiger);
-    unsigned l = aiger_strip(and->rhs0), r = aiger_strip(and->rhs1);
+  aiger_and * and = aiger_is_and(model, v->aiger);
+  unsigned l = aiger_strip(and->rhs0), r = aiger_strip(and->rhs1);
 
-    if(!is_in_pg(l) && !is_in_seen(l)){
-        if(c_in == l){
-          var(l)->neg = aiger_sign(and->rhs0);
-        }
-        else {
-          if (size_seen == seen_num) enlarge_seen ();
-          seen[seen_num++] =l;
-        }
-    }
-    if(!is_in_pg(r) && !is_in_seen(r)){
-      if(c_in == r){
-        var(r)->neg = aiger_sign(and->rhs1);
-
-      }
-      else {
-        if (size_seen == seen_num) enlarge_seen ();
-        seen[seen_num++] =r;
-      }
-    }
-    i++;
+  if(!var(l)->prop_gen_node && !var(l)->fsa){
+    if(c_in == l) var(l)->neg = aiger_sign(and->rhs0);
+    else if (!follow_path(l)) return 0;
   }
-
-  for(unsigned i=0; i < seen_num; i++){
-    Var * v = var(seen[i]);
-    v-> cl = 1;
+  if(!var(r)->prop_gen_node && !var(r)->fsa){
+    if(c_in == r) var(r)->neg = aiger_sign(and->rhs1);
+    else if (!follow_path(r)) return 0;
   }
-  seen_num = 0;
   return 1;
 }
 
 static int follow_all_carry_paths(){
   msg("checking last stage adder");
+  if(verbose >= 2)  msg("follow path starting with %i", adder_carry_out->aiger);
   int ret = follow_path(adder_carry_out->aiger);
   if(!ret) return 0;
   for (unsigned i = 0; i< cin_num-1; i++){
+    if(verbose >= 2)  msg("follow path starting with %i", cin[i]);
     ret = follow_path(cin[i]);
     if(!ret) return 0;
   }
@@ -1327,30 +1261,41 @@ static int follow_all_carry_paths(){
 }
 
 
-static void mark_adder(){
-  msg("marking adder");
-  for(unsigned i = 0; i < pg_num; i++){
-    Var * v = var(pg[i]);
-    if(inputs_num % 2 == 1 && v->cl == 2) continue;
-    v->cl = 1;
-    if(verbose >=4) msg ("marked %s with 1", v->name);
-    int val = 1;
-    if(v->haand) val = 2;
+static void mark_input_of_pg_unit(){
+  for(int i = 0; i< inputs_num; i++) {
+    if(var(inputs[i])->prop_gen_node) continue;
+    var(inputs[i])->fsa = 1;
+    var(inputs[i])->fsa_inp = 0;
+  }
+
+  for(unsigned i = M-1; i >= 1; i--){
+    Var * v = vars +i;
+    if(!v->prop_gen_node) continue;
+
+    if(single_gen_node && v->fsa_inp) continue;
+    v->fsa = 1;
+    v->fsa_inp = 0;
+    if(verbose >=4) msg ("marked v %s", v->name);
+
     aiger_and * and = aiger_is_and(model, v->aiger);
     unsigned l = aiger_strip(and->rhs0), r = aiger_strip(and->rhs1);
-    var(l)->cl = val;
-    if(verbose >=4) msg ("marked %s with %i", var(l)->name, val);
-    var(r)->cl = val;
-    if(verbose >=4) msg ("marked %s with %i", var(r)->name, val);
+    var(l)->fsa = 1;
+    if(v->haand) var(l)->fsa_inp ++;
+    if(verbose >=4) msg ("marked vl %s", var(l)->name);
+    var(r)->fsa = 1;
+    if(v->haand) var(r)->fsa_inp ++;
+    if(verbose >=4) msg ("marked vr %s", var(r)->name);
   }
-  var(c_in)->cl = 2;
-  if(verbose >=4) msg ("marked %s with 2", var(c_in)->name);
+  var(c_in)->fsa = 1;
+  var(c_in)->fsa_inp ++;
+  if(verbose >=4) msg ("marked %s", var(c_in)->name);
 
-  if(inputs_num % 2 == 1){
-    for(unsigned i = 0; i< inputs_num; i++) {
-      if(var(inputs[i])->cl != 2){
-        var(inputs[i])->cl = 2;
-        if(verbose >=4) msg ("remarked %s with 2", var(inputs[i])->name);
+  if(single_gen_node){
+    for(int i = 0; i< inputs_num; i++) {
+      if(!var(inputs[i])->fsa_inp ){
+        var(inputs[i])->fsa = 1;
+        var(inputs[i])->fsa_inp = 1;
+        if(verbose >=4) msg ("remarked %s", var(inputs[i])->name);
       }
     }
   }
@@ -1365,7 +1310,7 @@ static int find_adder(){
   if(!ret) return 0;
   ret = follow_all_carry_paths();
   if(!ret) return 0;
-  mark_adder();
+  mark_input_of_pg_unit();
   return 1;
 }
 
@@ -1375,7 +1320,7 @@ static void add_adder_input(){
   if (verbose >= 1) msg ("declare input nodes for adder miter");
   for(unsigned i = 1; i < M; i++){
     Var * v = vars +i;
-    if(v->cl != 2) continue;
+    if(!v->fsa_inp) continue;
     unsigned lit = v->aiger;
     const char * n1 = v->name;
     aiger_add_input (miter, lit, n1);
@@ -1387,8 +1332,8 @@ static void add_adder_ands(){
   if (verbose >= 1) msg ("declare and nodes for adder miter");
   for(unsigned i = 1; i < M; i++){
     Var * v = vars +i;
-    if(!v->cl) continue;
-    if(v->cl == 2) continue;
+    if(!v->fsa) continue;
+    if(v->fsa_inp) continue;
     unsigned lit = v->aiger;
     aiger_and * and = aiger_is_and (model, lit);
     aiger_add_and (miter, and->lhs, and->rhs0, and->rhs1);
@@ -1396,15 +1341,15 @@ static void add_adder_ands(){
   }
 }
 
-static void declare_adder_output(){
+static void add_adder_output(){
   if (verbose >= 1) msg ("declare output nodes for adder miter");
   for(unsigned i = 1; i < M; i++){
     Var * v = vars +i;
-    if(!v->cl) continue;
+    if(!v->fsa) continue;
     if (v->output != -1){
       unsigned lit = v->aiger;
       if (size_o1 == o1_count) enlarge_o1 ();
-      if((int)lit == adder_carry_out->aiger && tc){
+      if((int)lit == adder_carry_out->aiger && signed_mult){
         if (aiger_sign (lit)) o1[o1_count++] = not(lit);
         else o1[o1_count++] = lit;
       } else {
@@ -1442,6 +1387,7 @@ static unsigned btor_ha(unsigned i1, unsigned i2){
   max_idx = max_idx + 6;
   if (size_o2 == o2_count) enlarge_o2 ();
   o2[o2_count++] = three;
+  if(verbose >= 2) msg("ha with outputs %i, %i, inputs  %i, %i", two, three, i1, i2);
   return two;
 }
 
@@ -1475,17 +1421,56 @@ static unsigned btor_fa(unsigned i1, unsigned i2, unsigned i3){
   max_idx = max_idx + 14;
   if (size_o2 == o2_count) enlarge_o2 ();
   o2[o2_count++] = six;
+  if(verbose >= 2) msg("fa with outputs %i, %i, inputs  %i, %i, %i", seven, six, i1, i2, i3);
   return seven;
 }
 
-static void build_btor_adder(){
+static unsigned btor_fa_no_carry(unsigned i1, unsigned i2, unsigned i3){
+  unsigned one, two, three, four, five, six;
+  one = max_idx + 2;
+  two = one + 2;
+  three = two + 2;
+  four = three + 2;
+  five = four + 2;
+  six = five +2;
+
+  aiger_add_and(miter, one, not(i1), not(i2));
+  aiger_add_and(miter, two, i1, i2);
+  aiger_add_and(miter, three, not(one), not(two));
+  aiger_add_and(miter, four, not(i3), not(three));
+  aiger_add_and(miter, five, i3, three);
+  aiger_add_and(miter, six, not(four), not(five));
+
+  aiger_add_and(rewritten, one, not(i1), not(i2));
+  aiger_add_and(rewritten, two, i1, i2);
+  aiger_add_and(rewritten, three, not(one), not(two));
+  aiger_add_and(rewritten, four, not(i3), not(three));
+  aiger_add_and(rewritten, five, i3, three);
+  aiger_add_and(rewritten, six, not(four), not(five));
+
+  max_idx = max_idx + 12;
+  if (size_o2 == o2_count) enlarge_o2 ();
+  o2[o2_count++] = six;
+  if(verbose >= 2) msg("fa no carry with output %i, inputs %i, %i, %i", six, i1, i2, i3);
+  return six;
+}
+
+static int build_btor_adder(){
+  int fa_no_carry=0;
+
+  //avoid problem with bp-ba-csv
+  if(inputs[inputs_num-1]==inputs[inputs_num-2] &&
+     inputs[inputs_num-3]==inputs[inputs_num-4] && booth)
+     return 1;
+
   unsigned i2 = 0, i3 = 0;
   unsigned c = c_in;
   if(var(c_in)->neg) c = not(c);
 
-  if(inputs_num % 2 == 1){
+  if(single_gen_node){
+
     msg("no cin in FSA");
-    for(unsigned i = 0; i< inputs_num; i++) fprintf(stdout, "%i ", inputs[i]);
+
     Var * v = var(inputs[inputs_num-1]);
     i2 = v->aiger;
     if (!v->neg) i2 = not(i2);
@@ -1501,13 +1486,27 @@ static void build_btor_adder(){
     i3 = w->aiger;
     if (w->neg) i3 = not(i3);
 
-    if(v->cl != 2)       c = btor_ha(c, i3);
-    else if (w->cl != 2) c = btor_ha(c, v->aiger);
-    else                 c = not(btor_fa(c, i2, i3));
+
+    if(!v->fsa_inp)       c = btor_ha(c, i3);
+    else if (!w->fsa_inp) c = btor_ha(c, v->aiger);
+    else if (i==0 && v->fsa_inp ==2 && signed_mult){
+      if (w->neg) i3 = not(i3);
+      c = not(btor_fa(c, i2, i3));
+      c = btor_fa_no_carry(c, i2, i3);
+      fa_no_carry=1;
+
+    }
+    else if(v->fsa_inp > 1){
+      c = not(btor_fa(c, not(i2), i3));
+    }
+    else c = not(btor_fa(c, i2, i3));
   }
-  if(tc && adder_carry_out->output != -1) c = not(c);
-  if (size_o2 == o2_count) enlarge_o2 ();
-  o2[o2_count++] = c;
+  if(signed_mult && adder_carry_out->output != -1) c = not(c);
+  if(!fa_no_carry){
+    if (size_o2 == o2_count) enlarge_o2 ();
+    o2[o2_count++] = c;
+  }
+  return 0;
 }
 
 static int build_miter(){
@@ -1529,8 +1528,8 @@ static int build_adder_miter(){
   msg("build adder miter");
   add_adder_input();
   add_adder_ands();
-  declare_adder_output();
-  build_btor_adder();
+  add_adder_output();
+  if(build_btor_adder()) return -1;
   return build_miter();
 }
 
@@ -1550,9 +1549,9 @@ static void generate_rewritten_aig(){
   for(unsigned i = 1; i < M; i++){
     Var * v = vars +i;
     if(v->input) continue;
-    if(!v->cl || v->cl == 2){
+    if(!v->fsa || v->fsa_inp){
       aiger_and * and = aiger_is_and(model, v->aiger);
-      if(!v->cl && adder_carry_out){
+      if(!v->fsa && adder_carry_out){
         if((int) aiger_strip(and->rhs0) == adder_carry_out->aiger){
           if (!aiger_sign(and->rhs0)) out = not(btor_carry);
           else out = btor_carry;
@@ -1562,10 +1561,13 @@ static void generate_rewritten_aig(){
           if (!aiger_sign(and->rhs1)) out = not(btor_carry);
           else out = btor_carry;
           aiger_add_and (rewritten, and->lhs, out, and->rhs0);
-        } else aiger_add_and (rewritten, and->lhs, and->rhs0, and->rhs1);
-
+        } else {
+          aiger_add_and (rewritten, and->lhs, and->rhs0, and->rhs1);
+        }
       }
-      else aiger_add_and (rewritten, and->lhs, and->rhs0, and->rhs1);
+      else {
+        aiger_add_and (rewritten, and->lhs, and->rhs0, and->rhs1);
+      }
     }
   }
   unsigned out_idx = 0;
@@ -1684,9 +1686,10 @@ static void substitute(){
       miter_to_cnf(output_file);
       msg("writing miter to %s", output_name);
       generate_rewritten_aig();
+      aiger_reencode(rewritten);
 
       msg ("writing rewritten aig to '%s'", output_name2);
-      if (!aiger_write_to_file (rewritten, aiger_binary_mode, output_file2))
+      if (!aiger_write_to_file (rewritten, aiger_ascii_mode, output_file2))
         die ("failed to write rewritten '%s'", output_name2);
     }
 
@@ -3706,7 +3709,7 @@ static void correct_pp_signed(){
 }
 
 static void correct_pp(){
-  if(tc) correct_pp_signed();
+  if(signed_mult) correct_pp_signed();
   else correct_pp_unsigned();
 }
 /*------------------------------------------------------------------------*/
@@ -3797,7 +3800,7 @@ static Polynomial * non_inc_twos_comp_spec(){
 }
 
 static Polynomial * generate_non_inc_spec(){
-  if (tc) return non_inc_twos_comp_spec();
+  if (signed_mult) return non_inc_twos_comp_spec();
   else return non_inc_spec();
 }
 
@@ -3929,7 +3932,7 @@ static Polynomial * inc_twos_comp_spec(int index){
 
 
 static Polynomial * generate_inc_spec(int index){
-  if (tc) return inc_twos_comp_spec(index);
+  if (signed_mult) return inc_twos_comp_spec(index);
   else return inc_spec(index);
 }
 
@@ -4057,7 +4060,18 @@ static void print_nss_proof(){
 // Generating Counter examples
 
 static void write_witness_vector(Term * t, FILE * file){
+
+ if(!t){
+    msg ("  all inputs = 0;\n");
+    for(unsigned i = 0; i <= N-1; i++){
+      fprintf(file, "00");
+    }
+    fprintf(file, "\n");
+    return;
+  }
+
   msg_no_nl ("  ");
+
   for(unsigned i = 0; i <= N-1; i++){
     Var * v = var(alit(i));
     if(var_in_term(v, t)) {
@@ -4140,8 +4154,6 @@ static void reset_substitute(){
   deallocate_vars();
   deallocate_vstack ();
   deallocate_mstack ();
-  deallocate_seen ();
-  deallocate_pg ();
   deallocate_cin ();
   deallocate_inputs ();
   deallocate_o1 ();
@@ -4196,7 +4208,7 @@ int main (int argc, char ** argv) {
     } else if (!strcmp (argv[i], "-certify")) {
       modus = 3;
     } else if (!strcmp (argv[i], "-signed")) {
-      tc = 1;
+      signed_mult = 1;
     } else if (!strcmp (argv[i], "-swap")) {
       msg("using swapped inputs and alternative variable names");
       swap = 1;
