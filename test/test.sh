@@ -21,6 +21,6 @@ echo "verify" >> bpwtcl64.log
 
 # Certifying a complex signed multiplier
 echo "substitution" > s_sparcl64.log
-../amulet -substitute s_sparcl64.aig s_sparcl64.cnf s_sparcl64_rewr.aig -2comp >> s_sparcl64.log
+../amulet -substitute s_sparcl64.aig s_sparcl64.cnf s_sparcl64_rewr.aig -signed >> s_sparcl64.log
 echo "certify" >> s_sparcl64.log
-../amulet -certify -2comp s_sparcl64_rewr.aig s_sparcl64.polys s_sparcl64.pac s_sparcl64.spec >> s_sparcl64.log
+../amulet -certify -signed s_sparcl64_rewr.aig s_sparcl64.polys s_sparcl64.pac s_sparcl64.spec >> s_sparcl64.log
