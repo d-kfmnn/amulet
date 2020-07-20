@@ -33,6 +33,10 @@ In Vampire 2018 and Vampire 2019. The 5th and 6th Vampire Workshops, pages 1-18,
 Daniela Kaufmann
 
 ------------------------------------------------------------------------------------------------------
+20.07.2020 AMulet Version 5:
+Improved: 
+  - Final stage-adder detection for multipliers containing redundant binary addition trees. 
+
 16.06.2020 AMulet Version 4:
 Fixed:
   - Fixed bugs in adder substitution for signed multipliers.
