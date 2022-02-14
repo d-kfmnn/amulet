@@ -1,6 +1,15 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-AMulet - AIG Multiplier Examination Tool
+# !!! DEPRECATED - see  [`AMulet2`](http://github.com/d-kfmnn/amulet2) instead !!!
+
+This repository is no longer maintained and is only kept for archivation. Please, see the newest version [`AMulet2`](http://github.com/d-kfmnn/amulet2) instead.
+
+<br><br><br>
+
+
+
+
+## AMulet - AIG Multiplier Examination Tool
 ==============================================
 
 Our tool AMulet is able to verify and certify unsigned and signed integer multipliers 
